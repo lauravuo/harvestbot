@@ -5,12 +5,11 @@ export default () => {
   const calendar = cal();
   const sortByDate = (a, b) => new Date(a.date) - new Date(b.date);
 
-  const getPeriodRangeEnd = (entriesDate, latestFullDate, today = new Date()) =>
-    (
-      calendar.datesEqual(entriesDate, today)
-        ? entriesDate
-        : latestFullDate
-    );
+  const getPeriodRangeEnd = (entriesDate, latestFullDate, today = new Date()) => (
+    calendar.datesEqual(entriesDate, today)
+      ? entriesDate
+      : latestFullDate
+  );
 
   const getBillablePercentage = (
     entries,
