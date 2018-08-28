@@ -14,8 +14,7 @@ export default (config, http, responseUrl) => {
       .mergeMap(({ user: { profile: { email } } }) => Observable.of(email))
       .toPromise();
 
-  const postResponse = (messageArray, message = Array.isArray(messageArray) ? messageArray.join('\n') : messageArray) =>
-    api.postJson(responseUrl, { text: message }).toPromise();
+  const postResponse = (messageArray, message = Array.isArray(messageArray) ? messageArray.join('\n') : messageArray) => api.postJson(responseUrl, { text: message }).toPromise();
 
   return { getUserEmailForId, postResponse };
 };
