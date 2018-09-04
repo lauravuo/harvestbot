@@ -1,57 +1,109 @@
-import rcloadenv from '@google-cloud/rcloadenv';
-
 import application from './app';
-import logger from './log';
-import db from './db';
+import log from './log';
+import db from './cloud/db';
+import queue from './cloud/queue';
 import http from './http';
+import settings from './settings';
 import slackApi from './slack';
+import verifier from './verifier';
 
-const validateEnv = () => {
-  const getEnvParam = param => (process.env[param] ? process.env[param] : logger.error(`Environment variable ${param} missing.`));
-  const config = {};
-  const ignoreTaskIds = getEnvParam('IGNORE_FROM_FLEX_TASK_IDS');
-  const emailDomains = getEnvParam('ALLOWED_EMAIL_DOMAINS');
-  config.ignoreTaskIds = ignoreTaskIds ? ignoreTaskIds.split(',').map(id => parseInt(id, 10)) : [];
-  config.emailDomains = emailDomains ? emailDomains.split(',') : [];
-  config.projectId = getEnvParam('GCLOUD_PROJECT');
-  config.harvestAccessToken = getEnvParam('HARVEST_ACCESS_TOKEN');
-  config.harvestAccountId = getEnvParam('HARVEST_ACCOUNT_ID');
-  config.slackBotToken = getEnvParam('SLACK_BOT_TOKEN');
-  return config;
-};
+let logger = null;
+let appConfig = null;
 
-/* eslint-disable import/prefer-default-export */
-export const calcFlextime = (req, res) => {
-  if (req.body.text === 'help') {
-    return res.json({ text: '_Bot for calculating your harvest balance. Use /flextime with no parameters to start calculation._' });
+const getAppConfig = async () => {
+  if (appConfig) {
+    return appConfig;
   }
-  res.json({ text: 'Starting to calculate flextime. This may take a while...' });
-
-  return rcloadenv.getAndApply('harvestbot-config').then(() => {
-    logger.info('gCloud config applied');
-    const config = validateEnv();
-    const slack = slackApi(http, req.body.response_url);
-    const userId = req.body.user_id;
-    if (userId) {
-      logger.info(`Fetching data for user id ${userId}`);
-      slack.getUserEmailForId(userId)
-        .then((email) => {
-          db(config).storeUserData(userId, email);
-          application(config, http, slack.postResponse).calcFlexTime(email);
-        })
-        .catch(err => logger.error(err));
-    } else {
-      logger.error('User id missing.');
-    }
-  });
+  appConfig = await settings().getConfig();
+  logger = log(appConfig);
+  return appConfig;
 };
-/* eslint-enable import/prefer-default-export */
 
-if (process.argv.length === 3) {
-  const printResponse =
-    msgs => (Array.isArray(msgs) ? msgs.forEach(msg => logger.info(msg)) : logger.info(msgs));
+export const initFlextime = async (req, res) => {
+  const config = await getAppConfig();
+  if (verifier(config).verifySlackRequest(req)) {
+    if (req.body.text === 'help') {
+      return res.json({ text: '_Bot for calculating your harvest balance. Use /flextime with no parameters to start calculation._' });
+    }
+    const cmdParts = req.body.text.split(' ');
+    if (cmdParts.length > 0 && cmdParts[0] === 'stats') {
+      const currentDate = new Date();
+      const year = cmdParts.length > 1 ? cmdParts[1] : currentDate.getFullYear();
+      const month = cmdParts.length > 2 ? cmdParts[2] : currentDate.getMonth() + 1;
+      await queue(config)
+        .enqueueStatsRequest({
+          userId: req.body.user_id, responseUrl: req.body.response_url, year, month,
+        });
+      return res.json({ text: 'Starting to generate stats. This may take a while...' });
+    }
+    await queue(config)
+      .enqueueFlexTimeRequest({ userId: req.body.user_id, responseUrl: req.body.response_url });
+    return res.json({ text: 'Starting to calculate flextime. This may take a while... Join channel #harvest for weekly notifications.' });
+  }
+  return res.status(401).send('Unauthorized');
+};
 
-  const email = process.argv[2];
-  logger.info(`Email ${email}`);
-  application(validateEnv(), http, printResponse).calcFlexTime(email);
-}
+export const calcFlextime = async (message) => {
+  const config = await getAppConfig();
+  const request = JSON.parse(Buffer.from(message.data, 'base64').toString());
+  const slack = slackApi(config, http, request.responseUrl);
+  const { userId } = request;
+
+  if (userId) {
+    logger.info(`Fetching data for user id ${userId}`);
+    const email = request.email || await slack.getUserEmailForId(userId);
+    if (!email) {
+      return slack.postMessage(userId, 'Cannot find email for Slack user id');
+    }
+    if (!request.email) {
+      await slack.postMessage(userId, `Fetching time entries for email ${email}`);
+    }
+    await db(config).storeUserData(userId, email);
+    logger.info('User data stored');
+
+    const data = await application(config, http).calcFlextime(email);
+    logger.info('Flextime calculated');
+
+    return slack.postMessage(userId, data.header, data.messages);
+  }
+  return logger.error('Cannot find Slack user id');
+};
+
+export const notifyUsers = async (req, res) => {
+  const config = await getAppConfig();
+  if (verifier(config).verifySlackRequest(req)) {
+    const store = db(config);
+    const msgQueue = queue(config);
+
+    const users = await store.fetchUsers;
+    logger.info(`Found ${users.length} users`);
+
+    await Promise.all(users.map(async ({ email, id }) => {
+      logger.info(`Notify ${email}`);
+      return msgQueue.enqueueFlexTimeRequest({ userId: id, email });
+    }));
+    return res.json({ text: 'ok' });
+  }
+  return res.status(401).send('Unauthorized');
+};
+
+export const calcStats = async (message) => {
+  const config = await getAppConfig();
+  const request = JSON.parse(Buffer.from(message.data, 'base64').toString());
+  const slack = slackApi(config, http, request.responseUrl);
+  const { userId, year, month } = request;
+
+  if (userId) {
+    logger.info(`Calculating stats requested by user ${userId}`);
+    const email = await slack.getUserEmailForId(userId); // TODO: need slack admin role?
+    if (!email) {
+      return slack.postMessage(userId, 'Cannot find email for Slack user id');
+    }
+
+    const result = await application(config, http).generateReport(year, month, email);
+    logger.info('Stats generated');
+
+    return slack.postMessage(userId, result);
+  }
+  return logger.error('Cannot find Slack user id');
+};

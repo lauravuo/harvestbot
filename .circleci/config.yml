@@ -1,20 +1,15 @@
 version: 2
 jobs:
-  test:
+  prepare:
     docker:
-      - image: circleci/node:9.9.0
-
-    working_directory: ~/repo
+      - image: circleci/node:10.8.0
 
     steps:
       - checkout
 
-      # Download and cache dependencies
       - restore_cache:
           keys:
-          - v1-dependencies-{{ checksum "package.json" }}
-          # fallback to using the latest cache if no exact match is found
-          - v1-dependencies-
+          - npm-deps-{{ .Branch }}-{{ checksum "package-lock.json" }}
 
       - run: npm install
 
@@ -22,27 +17,58 @@ jobs:
 
       - save_cache:
           paths:
-            - node_modules
-          key: v1-dependencies-{{ checksum "package.json" }}
-
-      - run: npm run test
+            - $HOME/.npm
+          key: npm-deps-{{ .Branch }}-{{ checksum "package-lock.json" }}
 
       - run: npm run ci:lock:upload
 
+  test:
+    docker:
+      - image: circleci/node:10.8.0
+
+    steps:
+      - checkout
+
+      - restore_cache:
+          keys:
+          - npm-deps-{{ .Branch }}-{{ checksum "package-lock.json" }}
+
+      - run: npm ci
+
+      - run: npm run test
+
+  automerge:
+    docker:
+      - image: circleci/node:10.8.0
+
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+          - npm-deps-{{ .Branch }}-{{ checksum "package-lock.json" }}
+      - run: npm ci
+      - run:
+          name: Merge greenkeeper branch
+          command: npm run ci:automerge
+
   build:
     docker:
-      - image: circleci/node:9.9.0
+      - image: circleci/node:10.8.0
     steps:
       - add_ssh_keys:
           fingerprints:
-            - "34:69:74:3f:3f:94:db:30:c4:67:6c:c7:3a:f2:0c:13"
+            - 73:b4:4d:e2:33:06:62:72:5b:df:cd:8c:f4:be:d8:cc
       - checkout
-      - run: npm install
+      - restore_cache:
+          keys:
+          - npm-deps-{{ .Branch }}-{{ checksum "package-lock.json" }}
+      - run: npm ci
       - run: npm run build
       - run: |
           git config --global user.email "circleci@harvestbot"
           git config --global user.name "CircleCI"
-          git add ./build # Update build output
+          cp -R build/ bin/
+          git add ./bin
           if git commit -a -m "[skip ci] Update deployable build output."; then
             git push origin master
             # Trigger deployment with updated build output
@@ -59,16 +85,45 @@ jobs:
       - run: |
           gcloud auth activate-service-account --key-file=${HOME}/gcloud-service-key.json
           gcloud --quiet config set project ${GCLOUD_PROJECT}
-          gcloud functions deploy ${GCLOUD_FUNCTION_NAME} --source ${GCLOUD_REPOSITORY_URL}
+          gcloud functions deploy initFlextime --source ${GCLOUD_REPOSITORY_URL} --region ${GCLOUD_FUNCTION_REGION} --format=none
+          gcloud functions deploy calcFlextime --source ${GCLOUD_REPOSITORY_URL} --region ${GCLOUD_FUNCTION_REGION} --format=none
+          gcloud functions deploy calcStats --source ${GCLOUD_REPOSITORY_URL} --region ${GCLOUD_FUNCTION_REGION} --format=none
+          gcloud functions deploy notify --source ${GCLOUD_REPOSITORY_URL} --region ${GCLOUD_FUNCTION_REGION} --format=none
+
+  notify:
+    docker:
+      - image: circleci/node:10.8.0
+    steps:
+      - checkout
+      - run: ./tools/notify.sh
 
 workflows:
   version: 2
   test_and_deploy:
     jobs:
-      - test
+      - prepare
+      - test:
+          requires:
+            - prepare
+      - automerge:
+          requires:
+            - test
+          filters:
+            branches:
+              only: /greenkeeper\S*/
       - build:
           requires:
             - test
           filters:
             branches:
               only: master
+  notify:
+    triggers:
+      - schedule:
+          cron: "0 11 * * 5"
+          filters:
+            branches:
+              only:
+                - master
+    jobs:
+      - notify

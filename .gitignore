@@ -2,3 +2,7 @@ node_modules
 .envrc
 .DS_Store
 coverage/
+build/
+.terraform/
+*.tfstate
+*.backup
