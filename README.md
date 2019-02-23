@@ -1,3 +1,6 @@
+**NOTE: this repo is not maintained, check [Newthings fork](https://github.com/NewThingsCo/harvestbot) instead.**
+
+
 # Harvestbot
 
 [![Greenkeeper badge](https://badges.greenkeeper.io/lauravuo/harvestbot.svg)](https://greenkeeper.io/)
